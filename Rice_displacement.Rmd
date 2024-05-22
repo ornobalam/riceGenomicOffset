@@ -1,0 +1,402 @@
+---
+title: "Displacement analyses"
+output: html_notebook
+---
+
+Loading libraries
+```{r}
+
+library(sf)
+library(tmap)
+library(tidyverse)
+library(stars)
+
+```
+
+Importing data for japonica
+
+```{r}
+
+jap_offset_2.6 = readRDS("for_plotting/offset_2.6_PC1_K8.rds")
+jap_offset_7.0 = readRDS("for_plotting/offset_7.0_PC1_K8.rds")
+jap_offset_8.5 = readRDS("for_plotting/offset_8.5_PC1_K8.rds")
+jap_offset_past = readRDS("for_plotting/offset_past_PC1_K8.rds")
+
+jap_ids = read.table("for_plotting/japs_order.txt")
+
+jap_indivs = data.frame(jap_ids$V1,
+                  jap_offset_2.6$offset,
+                  jap_offset_7.0$offset,
+                  jap_offset_8.5$offset,
+                  jap_offset_past$offset)
+
+
+colnames(jap_indivs) = c("ID",
+                   "offset_2.6",
+                   "offset_7.0",
+                   "offset_8.5",
+                   "offset_past"
+                   )
+
+meta = read.csv("for_plotting/japonica_accessions.csv")
+
+jap_indivs_meta = dplyr::left_join(jap_indivs,meta)
+
+
+
+```
+
+
+
+Using grids sampled across Asia to identify locations at which each landrace will be least maladapted in the three future SSP scenarios.
+
+First, we downsample to keep 10,000 grids across Asia.
+
+
+```{r}
+
+
+
+cmip = readRDS("cmip6_downsampled.rds")
+
+# convert into sf format for data frame-like manipulation
+cmip_sf = st_as_sf(cmip)
+
+cmip_sf$ID = 1:nrow(cmip_sf)
+
+#set.seed(123)
+#samples = sample(1:nrow(cmip_sf),10000)
+#saveRDS(samples,"samples.rds")
+
+samples = readRDS("rice_displacement/samples.rds")
+
+cmip_sf_ds = cmip_sf[samples,]
+
+# Plotting to show extent of coverage by grids:
+
+data(World)
+asia = World %>% dplyr::filter(continent == "Asia")
+
+tm_shape(asia) +
+  tm_polygons() +
+  tm_shape(cmip_sf_ds) +
+  tm_dots(col = "black")
+
+```
+
+
+For each subspecies (indica or japonica) in each SSP scenario, there will be 10,000 separate runs of the LEA::genetic.offset function; in each run, the predicted climate for all rice individuals will be that of a specific grid.
+
+In total, there will be 60,000 runs, three SSP scenarios for japonica and indica, respectively.
+
+Converting the environmental variables in the grids into the format I need to calculate genomic offset statistics.
+
+```{r}
+# transform into long format
+cmip_long = tidyr::pivot_longer(cmip_sf_ds,cols = 1:45)
+
+# add columns for model, ssp, and bioclim variable
+cmip_long_anno = cmip_long %>% 
+  dplyr::mutate(ssp = case_when(grepl("2.6",name) ~ "SSP1-2.6",
+                                grepl("7.0",name) ~ "SSP3-7.0",
+                                grepl("8.5",name) ~ "SSP5-8.5") ,
+                model = case_when(grepl("gfdl",name) ~ "gfdl",
+                                grepl("ipsl",name) ~ "ipsl",
+                                grepl("mpi",name) ~ "mpi",
+                                grepl("mri",name) ~ "mri",
+                                grepl("ukesm",name) ~ "ukesm"),
+                bio = case_when(grepl("bio1.S",name) ~ "bio1",
+                                grepl("bio10.S",name) ~ "bio10",
+                                grepl("bio5",name) ~ "bio5"))
+
+cmip_long_means = cmip_long_anno %>% 
+  dplyr::group_by(ID,geometry,ssp,bio) %>% 
+   dplyr::summarise(mean = mean(value))
+
+ssp1 = cmip_long_means %>%
+  dplyr::filter(ssp == "SSP1-2.6") %>%
+  dplyr::select(-ssp) %>%
+  tidyr::pivot_wider(values_from = "mean",names_from = "bio")
+
+saveRDS(ssp1,"ssp1-2.6_continental.rds")
+
+ssp3 = cmip_long_means %>%
+  dplyr::filter(ssp == "SSP3-7.0") %>%
+  dplyr::select(-ssp) %>%
+  tidyr::pivot_wider(values_from = "mean",names_from = "bio")
+
+saveRDS(ssp3,"ssp3-7.0_continental.rds")
+
+ssp5 = cmip_long_means %>%
+  dplyr::filter(ssp == "SSP5-8.5") %>%
+  dplyr::select(-ssp) %>%
+  tidyr::pivot_wider(values_from = "mean",names_from = "bio")
+
+saveRDS(ssp5,"ssp5-8.5_continental.rds")
+
+```
+
+The next steps I run via scripts on the hpc. Here, I am showing them for japonica, but the indica scripts are present in the same directory, and only have the prefix IND_ appended to the same script names. 
+
+First, I have a script that breaks up 10,000 grids into lists of 20
+
+```{bash}
+
+# Need to first make these folders to keep the lists
+
+#mkdir japonica_ssp1-2.6_permut
+#mkdir japonica_ssp1-7.0_permut
+#mkdir japonica_ssp1-8.5_permut
+
+cat for_plotting/produce_env.R
+```
+
+A bash script to run the R script:
+```{bash}
+cat for_plotting/run_produce_env.sh
+```
+The following R script runs the genetic.offset function; need to create lists of the 20-grouped grid lists from the previous step
+
+```{bash}
+#ls japonica_ssp1-2.6_permut/* > permut_2.6_list.txt
+#ls japonica_ssp1-7.0_permut/* > permut_7.0_list.txt
+#ls japonica_ssp1-8.5_permut/* > permut_8.5_list.txt
+
+cat for_plotting/continental_permut_offset.R
+
+```
+
+Bash script to run the R script (needs to switch out 2.6 to 7.0 and 8.5 for the two other SSP scenarios):
+
+```{bash}
+cat for_plotting/run_continental_permut_offset.sh
+
+```
+Once these have all run, we can import the results and find the grid with the minimum genetic offset for each individual (for each subspecies in every SSP scenario).
+
+For japonica:
+
+```{r}
+j2.6 = data.frame()
+j7.0 = data.frame()
+j8.5 = data.frame()
+
+indices = gsub("jap_offset_7.0_polygon_","",dir("japonica_permut_offset_7.0"))
+indices = as.numeric(gsub(".rds","",indices))
+
+
+for (i in indices){
+  t2.6 = readRDS(paste0("japonica_permut_offset_2.6/jap_offset_2.6_polygon_",i,".rds"))
+  t7.0 = readRDS(paste0("japonica_permut_offset_7.0/jap_offset_7.0_polygon_",i,".rds"))
+  t8.5 = readRDS(paste0("japonica_permut_offset_8.5/jap_offset_8.5_polygon_",i,".rds"))
+  j2.6 = rbind(j2.6,t2.6$offset)
+  j7.0 = rbind(j7.0,t7.0$offset)
+  j8.5 = rbind(j8.5,t8.5$offset)
+}
+
+jap_indivs_meta$min_2.6 = apply(j2.6,2,min)
+jap_indivs_meta$min_7.0  = apply(j7.0,2,min)
+jap_indivs_meta$min_8.5 = apply(j8.5,2,min)
+
+
+jap_indivs_meta$min_index_2.6 = indices[apply(j2.6,2,which.min)]
+jap_indivs_meta$min_index_7.0 = indices[apply(j7.0,2,which.min)]
+jap_indivs_meta$min_index_8.5 = indices[apply(j8.5,2,which.min)]
+```
+
+Merging the grid locations. For each condition, each individual accession is assigned the grid with the minimum genetic offset: its projected best location. Grid centroids are calculated.
+
+I use the difference between the absolute value of the projected best location latitude and the absolute value of its present latitude. If this number is positive, it indicates movement away from the equator.
+
+```{r}
+
+grid_locations = cmip_sf_ds %>% 
+  dplyr::select(ID,geometry)
+
+colnames(grid_locations) = c("min_index_2.6","geometry_2.6")
+jap_indivs_meta = left_join(jap_indivs_meta,grid_locations)
+
+colnames(grid_locations) = c("min_index_7.0","geometry_7.0")
+jap_indivs_meta = left_join(jap_indivs_meta,grid_locations)
+
+colnames(grid_locations) = c("min_index_8.5","geometry_8.5")
+jap_indivs_meta = left_join(jap_indivs_meta,grid_locations)
+
+
+jap_indivs_meta$centroid_2.6 =  st_centroid(jap_indivs_meta$geometry_2.6)
+jap_indivs_meta$centroid_7.0 =  st_centroid(jap_indivs_meta$geometry_7.0)
+jap_indivs_meta$centroid_8.5 =  st_centroid(jap_indivs_meta$geometry_8.5)
+
+
+jap_indivs_meta = extract(jap_indivs_meta, centroid_2.6, into = c('LON_2.6', 'LAT_2.6'), '\\((.*),(.*)\\)', conv = T)
+jap_indivs_meta = extract(jap_indivs_meta, centroid_7.0, into = c('LON_7.0', 'LAT_7.0'), '\\((.*),(.*)\\)', conv = T)
+jap_indivs_meta = extract(jap_indivs_meta, centroid_8.5, into = c('LON_8.5', 'LAT_8.5'), '\\((.*),(.*)\\)', conv = T)
+
+jap_indivs_meta = jap_indivs_meta %>% 
+  dplyr::mutate(diff2.6 = abs(LAT_2.6) - abs(LAT),
+                diff7.0 = abs(LAT_7.0) - abs(LAT),
+                diff8.5 = abs(LAT_8.5) - abs(LAT))
+
+jap_indivs_meta_molten = jap_indivs_meta %>% dplyr::select(ID,diff2.6,diff7.0,diff8.5) %>%
+  pivot_longer(cols = c(diff2.6, diff8.5, diff7.0) )
+
+
+ggplot(jap_indivs_meta_molten,aes(x=value, fill = name)) +
+  geom_density(alpha = 0.3) +
+  facet_grid(rows = vars(name))
+
+```
+
+For making a video (not published as part of paper) of varieties moving from original location to centroid of projected grid:
+
+```{r}
+library(gganimate)
+
+ssp="7.0"
+
+t1 = jap_indivs_meta %>% dplyr::select("ID",LAT,LON,paste0("offset_",ssp))
+
+t2 = jap_indivs_meta %>% dplyr::select(ID,
+                                       paste0("LAT_",ssp),
+                                       paste0("LON_",ssp),
+                                       paste0("min_",ssp))
+colnames(t2) = colnames(t1)
+
+t1$model = "same"
+t2$model = "moved"
+
+jap_indivs_meta_model = rbind(t1,t2) %>% dplyr::group_by(ID)
+colnames(jap_indivs_meta_model)[4] = "offset"
+jap_indivs_meta_model$model = factor(jap_indivs_meta_model$model,levels = c("same","moved"))
+jap_indivs_meta_model$model_index = as.numeric(jap_indivs_meta_model$model)
+
+plot_shift = ggplot(asia) +
+  geom_sf() +
+  geom_point(data = jap_indivs_meta_model, 
+             mapping = aes(x = LON,y = LAT, color = offset,
+                           group = ID)) +
+            scale_colour_gradientn( colors = c("lightblue1","darkblue"),
+                                    limits=c(0,0.1)) +
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks = element_blank()) +
+  geom_hline(yintercept = 0, lty="dashed") +
+  ggtitle(paste0("SSP ",ssp)) 
+
+
+plot_shift + transition_time(model_index)
+
+a <- animate(plot_shift + transition_time(model_index),renderer = av_renderer(paste0("Model_",ssp,"_japonica.mp4")))
+
+```
+
+
+
+
+Doing the same analysis for indica. First, creating metadata dataframe for indica landraces:
+
+```{r}
+
+ind_offset_2.6 = readRDS("for_plotting/ind_offset_2.6.rds")
+ind_offset_7.0 = readRDS("for_plotting/ind_offset_7.0.rds")
+ind_offset_8.5 = readRDS("for_plotting/ind_offset_8.5.rds")
+ind_offset_past = readRDS("for_plotting/ind_offset_past.rds")
+
+ind_ids = read.table("for_plotting/inds_order.txt")
+
+ind_indivs = data.frame(ind_ids$V1,
+                  ind_offset_2.6$offset,
+                  ind_offset_7.0$offset,
+                  ind_offset_8.5$offset,
+                  ind_offset_past$offset)
+
+
+colnames(ind_indivs) = c("ID",
+                   "offset_2.6",
+                   "offset_7.0",
+                   "offset_8.5",
+                   "offset_past"
+                   )
+
+ind_meta = readRDS("for_plotting/indica_geotagged.rds")
+ind_meta$INDK7 = NULL
+
+ind_indivs_meta = dplyr::left_join(ind_indivs,ind_meta)
+
+
+```
+
+Getting indices of minimum genetic offset grids
+
+```{r}
+i2.6 = data.frame()
+i7.0 = data.frame()
+i8.5 = data.frame()
+
+ind_indices = gsub("ind_offset_7.0_polygon_","",dir("indica_permut_offset_7.0"))
+ind_indices = as.numeric(gsub(".rds","",ind_indices))
+
+
+for (i in ind_indices){
+  t2.6 = readRDS(paste0("indica_permut_offset_2.6/ind_offset_2.6_polygon_",i,".rds"))
+  t7.0 = readRDS(paste0("indica_permut_offset_7.0/ind_offset_7.0_polygon_",i,".rds"))
+  t8.5 = readRDS(paste0("indica_permut_offset_8.5/ind_offset_8.5_polygon_",i,".rds"))
+  i2.6 = rbind(i2.6,t2.6$offset)
+  i7.0 = rbind(i7.0,t7.0$offset)
+  i8.5 = rbind(i8.5,t8.5$offset)
+}
+
+ind_indivs_meta$min_2.6 = apply(i2.6,2,min)
+ind_indivs_meta$min_7.0  = apply(i7.0,2,min)
+ind_indivs_meta$min_8.5 = apply(i8.5,2,min)
+
+
+ind_indivs_meta$min_index_2.6 = indices[apply(i2.6,2,which.min)]
+ind_indivs_meta$min_index_7.0 = indices[apply(i7.0,2,which.min)]
+ind_indivs_meta$min_index_8.5 = indices[apply(i8.5,2,which.min)]
+
+```
+
+Getting location centroids of minimum genetic offset grids, and calculating absolute latitudinal distance between current location and future least maladapted location.
+
+(This is slightly weird code where I am repeatedly renaming the grid_locations columns to eventually get three geometry columns for the three SSP scenarios. Needs to be run in the order it's written.)
+
+```{r}
+grid_locations = cmip_sf_ds %>% 
+  dplyr::select(ID,geometry)
+
+colnames(grid_locations) = c("min_index_2.6","geometry_2.6")
+ind_indivs_meta = left_join(ind_indivs_meta,grid_locations)
+
+colnames(grid_locations) = c("min_index_7.0","geometry_7.0")
+ind_indivs_meta = left_join(ind_indivs_meta,grid_locations)
+
+colnames(grid_locations) = c("min_index_8.5","geometry_8.5")
+ind_indivs_meta = left_join(ind_indivs_meta,grid_locations)
+
+
+ind_indivs_meta$centroid_2.6 =  st_centroid(ind_indivs_meta$geometry_2.6)
+ind_indivs_meta$centroid_7.0 =  st_centroid(ind_indivs_meta$geometry_7.0)
+ind_indivs_meta$centroid_8.5 =  st_centroid(ind_indivs_meta$geometry_8.5)
+
+
+ind_indivs_meta = extract(ind_indivs_meta, centroid_2.6, into = c('LON_2.6', 'LAT_2.6'), '\\((.*),(.*)\\)', conv = T)
+ind_indivs_meta = extract(ind_indivs_meta, centroid_7.0, into = c('LON_7.0', 'LAT_7.0'), '\\((.*),(.*)\\)', conv = T)
+ind_indivs_meta = extract(ind_indivs_meta, centroid_8.5, into = c('LON_8.5', 'LAT_8.5'), '\\((.*),(.*)\\)', conv = T)
+
+ind_indivs_meta = ind_indivs_meta %>% 
+  dplyr::mutate(diff2.6 = abs(LAT_2.6) - abs(LAT),
+                diff7.0 = abs(LAT_7.0) - abs(LAT),
+                diff8.5 = abs(LAT_8.5) - abs(LAT))
+
+ind_indivs_meta_molten = ind_indivs_meta %>% dplyr::select(ID,diff2.6,diff7.0,diff8.5) %>%
+  pivot_longer(cols = c(diff2.6, diff8.5, diff7.0) )
+
+
+ggplot(ind_indivs_meta_molten,aes(x=value, fill = name)) +
+  geom_density(alpha = 0.3) +
+  facet_grid(rows = vars(name))
+```
+
+
